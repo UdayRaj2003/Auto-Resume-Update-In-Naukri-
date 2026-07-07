@@ -3,10 +3,12 @@ import os
 import re
 import sys
 import tempfile
-import json
+import json 
 import logging
 import socket
 import time
+import ctypes
+from ctypes import wintypes
 from functools import wraps
 from pathlib import Path
 from datetime import datetime
@@ -89,6 +91,54 @@ def internet_available():
     except OSError:
 
         return False
+
+def is_workstation_locked():
+    """
+    Returns True if Windows workstation is locked.
+    Returns False if user session is unlocked.
+    """
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+
+    UOI_NAME = 2
+
+    hDesktop = user32.OpenInputDesktop(
+        0,
+        False,
+        0x0001
+    )
+
+    if not hDesktop:
+        # Unable to open input desktop
+        # Usually means workstation is locked
+        return True
+
+    needed = wintypes.DWORD()
+
+    user32.GetUserObjectInformationW(
+        hDesktop,
+        UOI_NAME,
+        None,
+        0,
+        ctypes.byref(needed)
+    )
+
+    buffer = ctypes.create_unicode_buffer(
+        needed.value
+    )
+
+    user32.GetUserObjectInformationW(
+        hDesktop,
+        UOI_NAME,
+        buffer,
+        needed,
+        ctypes.byref(needed)
+    )
+
+    user32.CloseDesktop(hDesktop)
+
+    return buffer.value.lower() != "default"
+
 
 def retry(func):
     @wraps(func)
@@ -366,15 +416,57 @@ def main():
         logger.info(
             f"Execution Time: {execution:.2f}s"
         )
+        logger.info("-" * 80)
+        logger.info("")
 
         print(
             f"\nExecution Time : {execution:.2f} sec"
         )
 
         print("\n🎉 Finished")
+        
+        # --------------------------------------
+        # Auto Sleep
+        # --------------------------------------
 
-       
+        AUTO_SLEEP = os.getenv(
+            "AUTO_SLEEP",
+            "false"
+        ).lower() == "true"
 
+        AUTO_SLEEP_DELAY = int(
+            os.getenv(
+                "AUTO_SLEEP_DELAY",
+                "300"
+            )
+        )
+
+        if AUTO_SLEEP:
+
+            logger.info(
+                f"Waiting {AUTO_SLEEP_DELAY} seconds before checking workstation..."
+            )
+
+            time.sleep(AUTO_SLEEP_DELAY)
+
+            if is_workstation_locked():
+
+                logger.info(
+                    "Workstation is locked. Going to Sleep..."
+                )
+
+                ctypes.windll.PowrProf.SetSuspendState(
+                    False,
+                    False,
+                    False
+                )
+
+            else:
+
+                logger.info(
+                    "Workstation is unlocked. Sleep skipped."
+                )
+        
 
 if __name__ == "__main__":
     main()
