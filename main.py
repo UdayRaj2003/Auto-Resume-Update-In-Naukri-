@@ -87,7 +87,7 @@ if __name__ == "__main__":
             except Exception as e:
                 print(f"{Fore.RED}   Failed: {e}{Style.RESET_ALL}")
             
-            time.sleep(3)
+            time.sleep(10)
 
 
 

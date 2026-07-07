@@ -3,6 +3,12 @@ import os
 import re
 import sys
 import tempfile
+import json
+import logging
+import socket
+import time
+from functools import wraps
+from pathlib import Path
 from datetime import datetime
 
 import requests
@@ -11,33 +17,173 @@ from dotenv import load_dotenv
 from src.client.naukri_client import NaukriLoginClient
 
 
+load_dotenv(override=True)
+
+DOWNLOAD_TIMEOUT = int(
+    os.getenv("DOWNLOAD_TIMEOUT", "60")
+)
+
+RETRY_COUNT = int(
+    os.getenv("RETRY_COUNT", "3")
+)
+
+LOG_RETENTION_DAYS = int(
+    os.getenv("LOG_RETENTION_DAYS", "30")
+)
+
+username = os.getenv("USERNAME")
+password = os.getenv("PASSWORD")
+
+drive_url = os.getenv("GOOGLE_DRIVE_URL")
+
+
+BASE_DIR = Path(__file__).resolve().parent
+
+LOG_DIR = BASE_DIR / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+
+STATUS_FILE = BASE_DIR / "status.json"
+
+TODAY = datetime.now().strftime("%Y-%m-%d")
+
+LOG_FILE = LOG_DIR / f"{TODAY}.log"
+
+ERROR_LOG = LOG_DIR / "errors.log"
+
+
+
+logger = logging.getLogger("ResumeUpdater")
+logger.setLevel(logging.INFO)
+logger.propagate = False
+formatter = logging.Formatter(
+    "%(asctime)s | %(levelname)s | %(message)s"
+)
+
+fh = logging.FileHandler(LOG_FILE, encoding="utf-8")
+fh.setFormatter(formatter)
+
+if not logger.handlers:
+    logger.addHandler(fh)
+
+
+
+error_logger = logging.getLogger("ResumeErrors")
+error_logger.setLevel(logging.ERROR)
+error_logger.propagate = False
+efh = logging.FileHandler(ERROR_LOG, encoding="utf-8")
+efh.setFormatter(formatter)
+
+if not error_logger.handlers:
+    error_logger.addHandler(efh)
 # ==========================================================
 # Helpers
 # ==========================================================
+def internet_available():
+
+    try:
+
+        socket.create_connection(("8.8.8.8", 53), timeout=5)
+
+        return True
+
+    except OSError:
+
+        return False
+
+def retry(func):
+    @wraps(func)
+    def wrapper(*args, **kwargs):
+        last = None
+
+        for i in range(RETRY_COUNT):
+
+            try:
+                return func(*args, **kwargs)
+
+            except Exception as e:
+
+                last = e
+
+                logger.warning(
+                    f"Retry {i+1}/{RETRY_COUNT}: {e}"
+                )
+
+                time.sleep(min(2 ** i, 10))
+
+        raise last
+
+    return wrapper
+
+    
+    
+
+
+
+def save_status(status, msg=""):
+
+    data = {
+
+        "last_run": datetime.now().isoformat(),
+        "status": status,
+        "message": msg
+
+    }
+
+    with open(
+        STATUS_FILE,
+        "w",
+        encoding="utf-8"
+    ) as f:
+
+        json.dump(
+            data,
+            f,
+            indent=4
+        )
+
+def cleanup_logs():
+
+    LOG_DIR.mkdir(exist_ok=True)
+
+    cutoff = time.time() - (
+        LOG_RETENTION_DAYS * 86400
+    )
+
+    for file in LOG_DIR.glob("*.log"):
+
+        if file.name=="errors.log":
+            continue
+
+        if file.stat().st_mtime < cutoff:
+            file.unlink()
+
+
 
 def error(msg):
     print(f"\n❌ {msg}")
+
+    try:
+        logger.error(msg)
+    except:
+        pass
+
     sys.exit(1)
 
 
 def success(msg):
     print(f"✅ {msg}")
 
+    try:
+        logger.info(msg)
+    except:
+        pass
 
-# ==========================================================
-# Google Drive
-# ==========================================================
 
+    # ==========================================================
+    # Google Drive
+    # ==========================================================
+@retry
 def download_resume(share_url: str, resume_name: str) -> str:
-    """
-    Accepts a normal Google Drive share link like:
-
-    https://drive.google.com/file/d/FILE_ID/view?usp=sharing
-
-    Downloads the PDF and saves it as:
-
-    Uday_Resume_2026-07-07.pdf
-    """
 
     print("\n📥 Downloading latest resume from Google Drive...")
 
@@ -52,7 +198,11 @@ def download_resume(share_url: str, resume_name: str) -> str:
         f"https://drive.google.com/uc?export=download&id={file_id}"
     )
 
-    response = requests.get(download_url, timeout=60)
+    response = requests.get(
+        download_url,
+        timeout=DOWNLOAD_TIMEOUT
+    )
+
     response.raise_for_status()
 
     if not response.content.startswith(b"%PDF"):
@@ -68,7 +218,7 @@ def download_resume(share_url: str, resume_name: str) -> str:
 
     filepath = os.path.join(
         tempfile.gettempdir(),
-        filename,
+        filename
     )
 
     with open(filepath, "wb") as f:
@@ -78,13 +228,21 @@ def download_resume(share_url: str, resume_name: str) -> str:
 
     return filepath
 
+@retry
+def login_client(client):
+    return client.login()
 
+@retry
+def upload_resume(client,path):
+    return client.update_resume(path)
 # ==========================================================
 # Main
 # ==========================================================
 
 def main():
 
+    start = time.time()
+    cleanup_logs()
     parser = argparse.ArgumentParser(
         description="NopeRi Resume Auto Updater"
     )
@@ -101,18 +259,14 @@ def main():
     print("           NopeRi Resume Auto Updater")
     print("=" * 60)
 
-    load_dotenv(override=True)
 
-    username = os.getenv("USERNAME")
-    password = os.getenv("PASSWORD")
-
-    drive_url = os.getenv("GOOGLE_DRIVE_URL")
+    if not internet_available():
+        error("No Internet Connection")
 
     resume_name = os.getenv(
         "RESUME_NAME",
         "Resume"
     )
-
     if not username:
         error("USERNAME missing in .env")
 
@@ -148,7 +302,7 @@ def main():
             password
         )
 
-        client.login()
+        login_client(client)
 
         success("Login successful")
 
@@ -158,32 +312,68 @@ def main():
 
         print("\n📤 Uploading latest resume...")
 
-        result = client.update_resume(pdf_path)
+        result = upload_resume(client,pdf_path)
 
         success("Resume updated successfully")
+        logger.info(
+            f"Uploaded Resume : {os.path.basename(pdf_path)}"
+        )
+        save_status(
+            "SUCCESS",
+            "Resume Updated Successfully"
+            )
 
         print("\nResult")
         print("-" * 60)
         print(result)
+        logger.info(f"API Response : {result}")
 
     except Exception as e:
+
+        import traceback
+        
+        error_logger.error(
+            traceback.format_exc()
+        )
+        logger.error(str(e))
+
+        save_status(
+            "FAILED",
+            str(e)
+        )
 
         if args.debug:
             raise
 
         error(str(e))
 
+
+
     finally:
 
         if pdf_path and os.path.exists(pdf_path):
 
             try:
+
                 os.remove(pdf_path)
                 success("Temporary resume deleted")
+
             except Exception:
                 pass
 
-    print("\n🎉 Finished")
+        execution = time.time() - start
+
+        logger.info(
+            f"Execution Time: {execution:.2f}s"
+        )
+
+        print(
+            f"\nExecution Time : {execution:.2f} sec"
+        )
+
+        print("\n🎉 Finished")
+
+       
 
 
 if __name__ == "__main__":

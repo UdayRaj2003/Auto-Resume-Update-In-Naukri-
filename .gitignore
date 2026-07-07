@@ -31,3 +31,7 @@ dist/
 # Coverage (optional)
 .coverage
 htmlcov/
+
+logs/
+status.json 
+*.pyc
