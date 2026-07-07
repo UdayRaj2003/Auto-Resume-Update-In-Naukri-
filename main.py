@@ -4,7 +4,7 @@ from src.client.job_client import NaukriJobClient
 from dotenv import load_dotenv
 from colorama import Fore, Style, init
 import os
-load_dotenv()
+load_dotenv(override=True)
 import time 
 
 init(autoreset=True)

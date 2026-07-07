@@ -2,6 +2,7 @@ import logging
 import random
 import time
 import functools
+from pathlib import Path
 from io import BytesIO
 from src.client.session import build_session
 from src.config.constants import *
@@ -138,11 +139,19 @@ class NaukriLoginClient:
             print(res.content)
             raise NaukriAuthError("Login failed")
 
-        token = self.session.cookies.get("nauk_at")
+        token = None
+
+        for cookie in self.session.cookies:
+            if cookie.name == "nauk_at":
+                token = cookie.value
+                break
+
         if not token:
             raise NaukriAuthError("No token")
 
-        self.naukri_session = NaukriSession(token, self.session.cookies)
+        cookie_dict = {c.name: c.value for c in self.session.cookies}
+
+        self.naukri_session = NaukriSession(token, cookie_dict)
 
         try:
             self.cache["form_key"] = self.get_form_key2()
@@ -150,7 +159,6 @@ class NaukriLoginClient:
             pass
 
         return self.naukri_session
-
     # ------------------------------------------------------------------
     # form_key helpers
     # ------------------------------------------------------------------
@@ -197,8 +205,13 @@ class NaukriLoginClient:
         if not res.ok:
             logger.error("OTP verification failed: %s %s", res.status_code, res.text)
             raise NaukriAuthError(f"OTP verification failed ({res.status_code})")
+            
+        token = None
 
-        token = self.session.cookies.get("nauk_at")
+        for cookie in self.session.cookies:
+            if cookie.name == "nauk_at":
+                token = cookie.value
+                break
         if not token:
             # Some flows return the token in the JSON body instead
             try:
@@ -209,7 +222,8 @@ class NaukriLoginClient:
         if not token:
             raise NaukriAuthError("OTP verified but no auth token received")
 
-        self.naukri_session = NaukriSession(token, self.session.cookies)
+        cookie_dict = {c.name: c.value for c in self.session.cookies}
+        self.naukri_session = NaukriSession(token, cookie_dict)
 
         try:
             self.cache["form_key"] = self.get_form_key2()
@@ -385,7 +399,7 @@ class NaukriLoginClient:
         file_key = "U" + self.generate_file_key(13)
 
         if isinstance(file, str):
-            filename = file.split("/")[-1]
+            filename = Path(file).name
             with open(file, "rb") as f:
                 file_bytes = f.read()
         else:
