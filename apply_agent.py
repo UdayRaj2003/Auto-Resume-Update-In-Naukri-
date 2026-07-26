@@ -31,17 +31,139 @@ from src.client.jop_classifier import JobFilterPipeline2
 from src.exceptions.exceptions import NaukriAuthError, NaukriParseError
 from dotenv import load_dotenv
 from colorama import Fore, Back, Style, init
+from pathlib import Path
 import os
+import re
 import time
 import csv
 import logging
 from datetime import datetime
 
-load_dotenv()
-init(autoreset=True)
-
+load_dotenv(override=True)
+init(autoreset=True) 
 logger = logging.getLogger(__name__)
 
+BASE_DIR = Path(__file__).resolve().parent
+
+PROMPT_FILE = BASE_DIR / "prompts" / "backend.txt"
+
+
+
+DEFAULT_PROMPT = """
+    You are a strict job filter for a backend software engineer. Score each job 0-100.
+    Be precise — avoid clustering scores at 85 or 60. Use the full range.
+
+    CANDIDATE:
+    - 1 year professional experience (Backend Development + QA Engineering)
+    - B.Tech (2026) in Electronics & Telecommunication Engineering
+    - Core stack: Node.js, Python, JavaScript, TypeScript, MongoDB, Express.js, REST APIs, SQL
+    - Also knows: React.js, Redux Toolkit, FastAPI, Flask, Docker, Git, Linux,
+    Selenium, Playwright, Pytest, Postman, API Testing, Automation Testing,
+    AI Automation
+    - Solved 250+ DSA problems (C++)
+    - Looking for: Software Engineer, Backend Engineer, Python Developer,
+    Node.js Developer, SDE1, Full Stack Engineer (Backend-heavy),
+    QA Automation Engineer, SDET
+    - Prefers: startups, product companies, AI companies,
+    backend engineering, platform engineering, remote/hybrid
+    - Will NOT do: pure frontend, mobile,
+    data science, ML research, DevOps-only,
+    customer support, sales, SAP, Oracle Forms
+
+    SCORING RUBRIC — use the full range, not just 85/60:
+
+    90-100 — perfect fit, apply immediately
+    Node.js OR Python is mandatory tag + backend/fullstack role
+    OR Python/Node.js mentioned prominently in the title.
+    Experience requirement is 0-2 years.
+    Backend APIs, databases, automation, cloud or AI stack preferred.
+    Product company or startup preferred.
+
+    75-89 — strong fit, apply
+    Node.js or Python present (mandatory or optional),
+    backend/fullstack leaning,
+    experience 0-3 years,
+    maybe one unfamiliar technology but overall excellent match.
+
+    55-74 — decent fit, apply with lower priority
+    Some stack overlap,
+    fullstack but frontend slightly dominates,
+    experience 3-4 years,
+    company type unclear.
+
+    30-54 — weak, skip unless nothing better
+    Familiar technologies present,
+    role is vague,
+    frontend-heavy,
+    experience mismatch (4-5 years).
+
+    10-29 — poor match
+    Very little stack overlap,
+    Java-only,
+    .NET-only,
+    PHP-only,
+    ERP technologies,
+    support roles,
+    manual testing only.
+
+    0-9 — do not apply
+    Pure Java/Spring with zero Python/Node overlap,
+    .NET only,
+    PHP only,
+    SAP,
+    Oracle,
+    Customer Support,
+    Sales,
+    Walk-in,
+    Venue based hiring,
+    Internship,
+    Contract-only manual QA roles.
+    
+    If the title contains:
+        Software Engineer
+        Software Developer
+        Backend Developer
+        Python Developer
+        Node.js Developer
+        SDET
+        QA Automation Engineer
+
+        Never score below 60
+        unless the stack is completely unrelated.
+
+    RULES:
+    - Node.js + MongoDB + REST APIs + 0-2 years → 90+, no exceptions.
+    - Python backend (FastAPI/Flask/Django) → 90+.
+    - Java alongside Node.js/Python is acceptable — evaluate the complete stack.
+    - Fullstack with strong backend responsibilities → 70-85.
+    - Software Engineer roles mentioning Python or Node.js → 75-90.
+    - QA Automation roles using Selenium, Playwright, Pytest,
+    API Testing or Python automation → 70-90.
+    - Manual QA only → 60-80.
+    - Pure React/Angular/Vue with no backend → 0-15.
+    - DevOps-only or Infrastructure-only → 20-40.
+    - Internship roles → 0.
+    - Missing one or two technologies is normal — don't over-penalize.
+    - Recent jobs (0-1 day old) → mentally add 5 bonus points.
+
+    Return ONLY valid JSON, no explanation outside it:
+    {{
+    "0": {{"score": 95, "reason": "Excellent Node.js backend role with MongoDB, REST APIs, 0-2 years experience, product company"}},
+    "1": {{"score": 0, "reason": "Java/Spring only with zero backend stack overlap"}}
+    }}
+
+    Jobs:
+    {job_block}
+    """
+
+try:
+    AI_PROMPT = PROMPT_FILE.read_text(encoding="utf-8").strip()
+    if AI_PROMPT.startswith("AI_PROMPT"):
+        match = re.match(r'AI_PROMPT\s*=\s*"""(.*)"""\s*$', AI_PROMPT, re.S)
+        if match:
+            AI_PROMPT = match.group(1).strip()
+except FileNotFoundError:
+    AI_PROMPT = DEFAULT_PROMPT.strip()
 
 # ----------------------------------------------------------------------------------
 # Persistence — applied jobs CSV
@@ -61,7 +183,7 @@ def load_applied_jobs() -> set:
         return set()
     with open(CSV_FILE, "r", newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
-        return set(row["job_id"] for row in reader)
+        return set(str(row["job_id"]) for row in reader)
 
 
 def save_applied_job(job) -> None:
@@ -174,7 +296,7 @@ def print_pipeline_results(final_jobs: list) -> None:
     print(f"  {Fore.WHITE}{'─' * sum(col_w)}{Style.RESET_ALL}")
 
     for i, job in enumerate(final_jobs, 1):
-        score = job.get("score")
+        score = job.get("ai_score", job.get("score"))
         score_color = (
             Fore.GREEN  if score and score >= 70 else
             Fore.YELLOW if score and score >= 50 else
@@ -205,13 +327,14 @@ def print_fetch_progress(keyword: str, location: str, exp: int, page: int, fetch
     )
 
 
-def print_summary(total_found: int, total_allowed: int, applied: int, skipped_ext: int, failed: int) -> None:
+def print_summary(total_found: int, total_allowed: int, applied: int, skipped_ext: int, failed: int, skipped_done: int = 0) -> None:
     # Prints the final run summary table. Called once at the end of the script.
     print_section_title("run summary")
     rows = [
         ("Jobs fetched (total unique)", str(total_found),   Fore.WHITE),
         ("Jobs passed AI filter",       str(total_allowed), Fore.CYAN),
         ("Applied successfully",        str(applied),       Fore.GREEN),
+        ("Skipped (already applied)",   str(skipped_done),  Fore.YELLOW),
         ("Skipped (external apply)",    str(skipped_ext),   Fore.YELLOW),
         ("Failed",                      str(failed),        Fore.RED),
     ]
@@ -237,18 +360,20 @@ def print_summary(total_found: int, total_allowed: int, applied: int, skipped_ex
 # ----------------------------------------------------------------------------------
 
 def fetch_all_jobs(jc: NaukriJobClient) -> list:
-
+    
     BQUERIES = [
-        # Tier 1: exact stack match
-        {"keyword": "Node.js backend developer", "location": "Bangalore"},
-        {"keyword": "Python Developer",          "location": ""},
-        {"keyword": "Node.js Developer",         "location": ""},
-        {"keyword": "python backend developer",  "location": "Pune"},
+    {"keyword": "Software Engineer", "location": ""},
+    {"keyword": "SDE", "location": ""},
+    {"keyword": "Python Developer", "location": ""},
+    {"keyword": "Backend Developer", "location": ""},
+    {"keyword": "Full Stack Developer", "location": ""},
+    {"keyword": "QA Engineer", "location": ""},
     ]
+    
 
-    EXPERIENCE_LEVELS = [2]
-    PAGES   = 1
-    JOB_AGE = 2
+    EXPERIENCE_LEVELS = [0]
+    PAGES   = 3
+    JOB_AGE = 1
 
     seen_ids = set()
     all_jobs = []
@@ -311,6 +436,14 @@ if __name__ == "__main__":
     password = os.getenv("PASSWORD")
     ai_key   = os.getenv("OPEN_API_KEY")
 
+    if not username or not password:
+        print(f"\n{Fore.RED}  USERNAME and PASSWORD must be set in .env{Style.RESET_ALL}")
+        exit(1)
+
+    if not ai_key:
+        print(f"\n{Fore.RED}  OPEN_API_KEY must be set in .env{Style.RESET_ALL}")
+        exit(1)
+
     # Step 1: authenticate and establish session.
     print_section_title("logging in to naukri")
     client = NaukriLoginClient(username, password)
@@ -328,12 +461,12 @@ if __name__ == "__main__":
     # Step 3: run AI filter pipeline. Jobs are scored and ranked. Only those
     # above the pipeline's threshold are passed to the apply loop.
     print_section_title("running AI filter pipeline")
-    pipeline   = JobFilterPipeline2(openai_api_key=ai_key)
+    pipeline   = JobFilterPipeline2( openai_api_key=ai_key, prompt=AI_PROMPT)
     final_jobs = pipeline.run(jobs)
 
-    # Build a lookup from job_id to the pipeline result dict (score, ai_detail, etc.)
-    score_map    = {j["job_id"]: j for j in final_jobs}
-    allow        = set(score_map.keys())
+    # Build a lookup from job_id to the pipeline result dict (ai_score, ai_reason, etc.)
+    score_map = {str(j["job_id"]): j for j in final_jobs}
+    allow     = set(score_map.keys())
 
     print_pipeline_results(final_jobs)
 
@@ -342,15 +475,20 @@ if __name__ == "__main__":
 
     applied_count = 0
     skipped_ext   = 0
+    skipped_done  = 0
     failed_count  = 0
 
-    allowed_jobs = [j for j in jobs if j.job_id in allow]
+    allowed_jobs = [j for j in jobs if str(j.job_id) in allow]
     print_section_title(f"applying to {len(allowed_jobs)} filtered jobs")
 
     for index, job in enumerate(allowed_jobs, start=1):
-        meta      = score_map.get(job.job_id, {})
-        score     = meta.get("score")
-        ai_detail = meta.get("ai_detail")
+        if str(job.job_id) in applied_jobs_set:
+            skipped_done += 1
+            continue
+
+        meta      = score_map.get(str(job.job_id), {})
+        score     = meta.get("ai_score", meta.get("score"))
+        ai_detail = meta.get("ai_reason", meta.get("ai_detail"))
 
         print_job_header(
             index=index,
@@ -415,4 +553,5 @@ if __name__ == "__main__":
         applied=applied_count,
         skipped_ext=skipped_ext,
         failed=failed_count,
+        skipped_done=skipped_done,
     )

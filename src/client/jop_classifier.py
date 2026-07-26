@@ -50,21 +50,18 @@ class JobFilterPipeline2:
     VETO_TITLES = [
         "walk-in", "walkin", "walk in",
         "android developer", "ios developer", "flutter developer",
-        "frontend developer", "front-end developer",
         "principal engineer", "staff engineer", "architect",
         "vp of", "head of engineering", "head of technology",
         "founder", "tutor", "trainer",
-        "data scientist", "ml engineer", "data engineer", "intern", "internship",
-        "engineering manager", "etl engineer", "prompt engineer",
-        "analyst", "associate is engineer", "infra engineer",
+        "data scientist", "ml engineer", "data engineer",
+        "engineering manager", "etl engineer", 
+        "infra engineer",
         "observability engineer","Manager"
     ]
 
 
     VETO_COMPANIES = {
-    "accenture", "wipro", "infosys", "tcs", "cognizant",
-    "capgemini", "hcl", "tech mahindra", "mphasis", "hexaware",
-    "ltimindtree", "persistent", "birlasoft",
+    "accenture" 
 }
 
     # ── red flag sniff on description (cheap, pre-ai) ───────────────────────
@@ -81,7 +78,7 @@ class JobFilterPipeline2:
         "software", "developer", "engineer", "engineering",
         "backend", "full stack", "fullstack",
         "python", "node", "nodejs", "javascript", "typescript",
-        "django", "fastapi", "flask", "golang",
+        "django", "fastapi", "flask", 
         "devops", "cloud", "sre", "platform",
         "api", "microservices", "infrastructure",
         "tech lead", "sde", "swe", "mts", "programmer","react"
@@ -90,30 +87,55 @@ class JobFilterPipeline2:
     # if ANY of these appear in title → drop it
     FRONTEND_VETO_KEYWORDS = {
         "frontend", "front-end", "front end",
-      "angular", "vue", "ui developer", "ui engineer",
+      "angular", "vue", 
         "android", "ios", "flutter", "mobile", "kotlin", "swift",
-        "embedded", "firmware",
-        "ml engineer", "data engineer", "data scientist","intern", "internship", "lead","Golang","MLops","devops","mlops", "golang"," Web developer - Java Technologies"
+         "firmware",
+        "ml engineer", "data scientist", "lead","Golang","MLops", "mlops", "golang"
         ," Member of Technical Staff - MTS"
     }
 
     def __init__(
         self,
         openai_api_key,
+        prompt=None,
         cache_file="score_cache.json",
-        daily_apply_limit=50,
-        min_apply_score=50,
+        daily_apply_limit=70,
+        min_apply_score=30,
         ai_score_limit=300,
-        batch_size=50,
+        batch_size=None,
     ):
-        self.api_key           = openai_api_key
-        self.url               = "https://api.openai.com/v1/chat/completions"
+    
+        self.api_key = openai_api_key
+        self.custom_prompt = prompt or self._default_prompt()
+
+        self.url = os.getenv(
+            "OPENAI_ENDPOINT",
+            "https://api.openai.com/v1/chat/completions"
+        )
+
+        self.model = os.getenv(
+            "OPENAI_MODEL",
+            "gpt-4o-mini"
+        )
+
+        self.site_url = os.getenv(
+            "OPENROUTER_SITE_URL",
+            ""
+        )
+
+        self.site_name = os.getenv(
+            "OPENROUTER_SITE_NAME",
+            "NopeRi"
+        )
+        
         self.cache_file        = cache_file
         self.daily_apply_limit = daily_apply_limit
         self.min_apply_score   = min_apply_score
         self.ai_score_limit    = ai_score_limit
-        self.batch_size        = batch_size
+        self.batch_size        = batch_size or int(os.getenv("AI_BATCH_SIZE", "10"))
+        self.ai_timeout        = int(os.getenv("AI_TIMEOUT", "120"))
         self.cache             = self._load_cache()
+    
 
     # =========================================================
     # MAIN
@@ -326,28 +348,64 @@ class JobFilterPipeline2:
     # =========================================================
     def ai_score_batch(self, jobs):
         result = []
-        for i in range(0, len(jobs), self.batch_size):
-            batch  = jobs[i:i + self.batch_size]
-            scores = self._call_ai(batch)
-            for idx, job in enumerate(batch):
+        total_batches = max(1, (len(jobs) + self.batch_size - 1) // self.batch_size)
+
+        for batch_num, i in enumerate(range(0, len(jobs), self.batch_size), 1):
+            batch = jobs[i:i + self.batch_size]
+            uncached = []
+
+            for job in batch:
                 jid  = str(job.get("job_id") or "")
                 data = self.cache.get(jid) if jid else None
+                if data:
+                    job["ai_score"]  = data.get("score", 0)
+                    job["ai_reason"] = data.get("reason", "")
+                else:
+                    uncached.append(job)
 
-                if not data:
+            if uncached:
+                print(
+                    f"  AI batch {batch_num}/{total_batches}: "
+                    f"scoring {len(uncached)} jobs "
+                    f"({len(batch) - len(uncached)} cached)..."
+                )
+                scores = self._call_ai(uncached)
+                for idx, job in enumerate(uncached):
+                    jid  = str(job.get("job_id") or "")
                     data = scores.get(str(idx), {"score": 0, "reason": "no response"})
-                    if not isinstance(data.get("score"), int):
+                    score = data.get("score", 0)
+                    if not isinstance(score, (int, float)):
                         data = {"score": 0, "reason": "parse error"}
+                    else:
+                        data["score"] = int(score)
                     if jid:
                         self.cache[jid] = data
+                    job["ai_score"]  = data.get("score", 0)
+                    job["ai_reason"] = data.get("reason", "")
+            else:
+                print(
+                    f"  AI batch {batch_num}/{total_batches}: "
+                    f"all {len(batch)} jobs loaded from cache"
+                )
 
-                job["ai_score"]  = data.get("score", 0)
-                job["ai_reason"] = data.get("reason", "")
-                result.append(job)
+            result.extend(batch)
 
         self._save_cache()
         return result
 
+    def _default_prompt(self):
+        return (
+            "Score each job 0-100 for a backend software engineer.\n"
+            "Return ONLY valid JSON like:\n"
+            '{{"0": {{"score": 85, "reason": "short reason"}}, "1": {{"score": 20, "reason": "short reason"}}}}\n\n'
+            "Jobs:\n{job_block}"
+        )
+
     def _call_ai(self, jobs):
+        if not self.api_key:
+            print("AI ERROR: OPEN_API_KEY is missing")
+            return {}
+
         job_block = ""
         for i, j in enumerate(jobs):
             mandatory = ", ".join(j.get("mandatory_tags", [])) or "none"
@@ -365,145 +423,78 @@ class JobFilterPipeline2:
                 f"---\n"
             )
         
-
-
-
-        prompt2 = f"""
-You are a strict job filter for a backend developer. Score each job 0-100.
-Be precise — avoid clustering scores at 85 or 60. Use the full range.
-
-CANDIDATE:
-- 2.3 years experience, backend-focused
-- Core stack: Node.js, Python, MongoDB, REST APIs, AWS
-- Also knows: Docker, CI/CD, automation, Selenium, Playwright, web scraping,
-  n8n, trigger.dev, LangChain, RAG, vector DBs, FastAPI, Flask, Express
-- Looking for: SDE1 / junior-mid backend or fullstack-backend roles
-- Prefers: startups, product companies, AI/automation work, remote/hybrid
-- Will NOT do: pure frontend, mobile, ML research, data science, DevOps-only
-
-SCORING RUBRIC — use the full range, not just 85/60:
-
-90-100 — perfect fit, apply immediately
-  Node.js OR Python is mandatory tag + backend/fullstack role or python/node js is in the title of the job
-  + exp 0-2 yrs + familiar supporting stack. Startup or product company.
-
-75-89 — strong fit, apply
-  Node.js or Python present (mandatory or optional) + backend lean
-  + exp 0-3 yrs. Maybe one unfamiliar tag but overall good match.
-
-55-74 — decent fit, apply with lower priority
-  Some stack overlap, role is fullstack but not backend-heavy,
-  or exp is 3-4 yrs, or company type unclear.
-
-30-54 — weak, skip unless nothing better
-  Familiar tech present but role is vague, frontend-leaning,
-  or exp mismatch 4-5 yrs.
-
-10-29 — poor match
-  Very little stack overlap, or role is clearly not backend and have java,  
-
-0-9 — do not apply
-   That contain Java  and dotnet  Zero stack overlap (Java+Spring only, PHP only, .NET only etc.)
-  OR walk-in / venue / intern role.
-
-RULES:
-- Node.js + MongoDB + 0-2yr backend → 90+, no exceptions
-- Java alongside Node/Python is fine — judge the full picture
-- Fullstack with Node backend → 65-80 depending on tag quality
-- "Software Engineer" with Python/Node tags → treat as backend, score 70-85
-- Pure React/Angular/Vue with no backend tags → 0-15
-- DevOps/infra-only with no app dev → 20-40
-- Intern roles → 0
-- Missing stack items is normal, don't over-penalise
-- Recency: 0-1 days old → mentally add 5 points
-
-Return ONLY valid JSON, no explanation outside it:
-{{
-  "0": {{"score": 92, "reason": "Node.js + MongoDB mandatory, 0-2yr, startup backend"}},
-  "1": {{"score": 0,  "reason": "Java/Spring only, zero overlap"}}
-}}
-
-Jobs:
-{job_block}
-"""
-        prompt = f"""
-You are scoring job listings for a backend developer. Score each job 0-100.
-
-CANDIDATE:
-- 2 years experience, backend-focused
-- Core stack: Node.js, Python, MongoDB, REST APIs, AWS
-- Also knows: automation, Selenium, web scraping, Docker, CI/CD, n8n, trigger.dev,
-  Playwright, Postman, Git, LangChain, RAG, vector DBs
-- Looking for: SDE1 or junior-mid backend/fullstack-backend roles
-- Likes: startups, product companies, AI/automation work, remote/hybrid
-
-SCORING:
-
-85-100 — apply immediately
-  Node.js or Python is a mandatory tag, other tags are familiar stack,
-  exp is 0-3 yrs or not specified, role is backend or fullstack-backend.
-
-60-84 — good fit, apply
-  Node.js or Python present but not mandatory, or fullstack role with
-  backend-heavy tags, or slight exp mismatch (3-4 yrs).
-
-35-59 — decent, worth applying
-  Some stack overlap but role is vague or tags are mixed frontend/backend,
-  or exp is borderline 4-5 yrs.
-
-10-34 — weak match, skip unless desperate
-  Familiar tech present but frontend-dominated, or very little tag overlap.
-
-0 — do not apply
-  Tags are entirely foreign stack (Java+Spring+Hibernate only, PHP only, etc.)
-  with zero overlap with candidate's stack. OR walk-in / venue in title.
-
-COMMON SENSE RULES (these matter):
-- Java appearing alongside Node.js or Python is FINE — score on the whole picture.
-- "Fullstack" with Node backend is a GOOD fit (60-80 range).
-- Missing one or two stack items is normal — don't penalise heavily.
-- A job tagged [node.js, mongodb] with exp 0-2 yrs should score 85+.
-- A job tagged [java, spring, hibernate] with NO node/python should score 0-15.
-- Recency matters: jobs 0-1 days old get +5 bonus mentally.
-
-Return ONLY valid JSON, no explanation outside it:
-{{
-  "0": {{"score": 85, "reason": "Node.js + MongoDB mandatory, 0-2yr, startup"}},
-  "1": {{"score": 0,  "reason": "Java/Spring only, zero stack overlap"}}
-}}
-
-Jobs:
-{job_block}
-"""
+        prompt2 = self.custom_prompt.format(job_block=job_block)
 
         try:
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json",
+            }
+
+            # OpenRouter headers
+            if "openrouter.ai" in self.url.lower():
+
+                if self.site_url:
+                    headers["HTTP-Referer"] = self.site_url
+
+                headers["X-Title"] = self.site_name
+
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": prompt2
+                    }
+                ],
+                "temperature": 0.2,
+            }
+
             res = requests.post(
                 self.url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type":  "application/json",
-                },
-                json={
-                    "model":       "gpt-4o-mini",
-                    "messages":    [{"role": "user", "content": prompt2}],
-                    "temperature": 0.2,
-                },
-                timeout=90,
+                headers=headers,
+                json=payload,
+                timeout=(15, self.ai_timeout),
             )
 
             if res.status_code != 200:
-                print("AI HTTP ERROR:", res.status_code, res.text[:200])
+                print("AI HTTP ERROR:", res.status_code)
+                print(res.text[:500])
                 return {}
 
             content = res.json()["choices"][0]["message"]["content"]
-            content = re.sub(r"```json|```", "", content).strip()
-            match   = re.search(r"\{.*\}", content, re.S)
+
+            content = re.sub(
+                r"```json|```",
+                "",
+                content
+            ).strip()
+
+            match = re.search(
+                r"\{.*\}",
+                content,
+                re.S
+            )
+
             if not match:
-                print("AI PARSE ERROR — raw:", content[:300])
+                print("AI PARSE ERROR")
+                print(content[:500])
                 return {}
 
-            data = json.loads(match.group(0))
+            data = json.loads(
+                match.group(0)
+            )
+
             return data if isinstance(data, dict) else {}
+
+        except requests.Timeout:
+            print(f"AI call error: request timed out after {self.ai_timeout}s")
+            return {}
+
+        except requests.RequestException as e:
+            print("AI call error:", e)
+            return {}
 
         except Exception as e:
             print("AI call error:", e)
