@@ -35,3 +35,8 @@ htmlcov/
 logs/
 status.json 
 *.pyc
+
+
+# Runtime data
+applied_jobs.csv
+score_cache.json
