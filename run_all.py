@@ -58,6 +58,13 @@ def ensure_venv() -> None:
 PYTHON = resolve_python()
 
 
+def pipeline_env() -> dict[str, str]:
+    env = os.environ.copy()
+    env.setdefault("PYTHONIOENCODING", "utf-8")
+    env.setdefault("PYTHONUTF8", "1")
+    return env
+
+
 def run_script(label: str, script: Path, extra_args: list[str]) -> int:
     print("\n" + "=" * 60)
     print(f"  Starting: {label}")
@@ -68,6 +75,7 @@ def run_script(label: str, script: Path, extra_args: list[str]) -> int:
     result = subprocess.run(
         [str(PYTHON), str(script), *extra_args],
         cwd=BASE_DIR,
+        env=pipeline_env(),
     )
     elapsed = time.time() - start
 

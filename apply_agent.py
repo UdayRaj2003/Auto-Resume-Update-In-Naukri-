@@ -34,11 +34,24 @@ from colorama import Fore, Back, Style, init
 from pathlib import Path
 import os
 import re
+import sys
 import time
 import csv
 import logging
 from datetime import datetime
 
+
+def configure_stdio_encoding() -> None:
+    """Task Scheduler consoles often use cp1252; UTF-8 avoids UnicodeEncodeError."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except Exception:
+                pass
+
+
+configure_stdio_encoding()
 load_dotenv(override=True)
 init(autoreset=True) 
 logger = logging.getLogger(__name__)
@@ -536,7 +549,7 @@ if __name__ == "__main__":
             applied_at = datetime.utcnow().strftime("%H:%M:%S UTC")
             print_status_applied(applied_at)
             save_applied_job(job)
-            applied_jobs_set.add(job.job_id)
+            applied_jobs_set.add(str(job.job_id))
             applied_count += 1
 
         except Exception as e:
