@@ -19,43 +19,35 @@ class JobFilterPipeline2:
         "django", "hapi", "koa",
 
         # ── Databases ────────────────────────────────────────────────
-        "mongodb", "mongoose", "postgresql", "mysql", "redis", "sqlite",
-        "dynamodb", "firestore", "cassandra", "elasticsearch",
+        "mongodb", "mongoose", "postgresql", "mysql", "redis", "sqlite", 
         "sql", "nosql",
 
         # ── Cloud & DevOps ───────────────────────────────────────────
-        "aws", "gcp", "azure", "docker", "kubernetes", "ci/cd",
-        "github actions", "jenkins", "terraform", "linux", "nginx",
-        "ec2", "s3", "lambda", "cloudwatch",
+        "aws",  "docker", "kubernetes", "ci/cd",
+        "github actions"  , "linux", 
+        "ec2", "s3", "lambda",  
 
         # ── APIs & Messaging ─────────────────────────────────────────
-        "rest", "rest api", "restful", "graphql", "websocket", "grpc",
-        "kafka", "rabbitmq", "celery", "bull", "socket.io",
+        "rest", "rest api", "restful", "websocket",
 
         # ── Automation & Scraping ────────────────────────────────────
-        "selenium", "playwright", "puppeteer", "beautifulsoup", "scrapy",
+        "selenium", "playwright", "puppeteer" , "scrapy",
         "web scraping", "automation", "n8n", "trigger.dev", "zapier",
 
-        # ── AI / LLM ─────────────────────────────────────────────────
-        "langchain", "openai", "llm", "rag", "vector db", "pinecone",
-        "weaviate", "chromadb", "huggingface", "embeddings", "genai",
-        "langsmith", "llamaindex",
-
         # ── Tools & Practices ────────────────────────────────────────
-        "git", "github", "postman", "swagger", "jwt", "oauth",
+        "git", "github", "postman" , "jwt", "oauth",
         "microservices", "system design", "api design",
     ]
 
     # ── hard veto BEFORE ai — title only, zero ambiguity ────────────────────
-    VETO_TITLES = [
-        "walk-in", "walkin", "walk in",
+    VETO_TITLES = [ 
         "android developer", "ios developer", "flutter developer",
-        "principal engineer", "staff engineer", "architect",
+        "principal engineer" , "architect",
         "vp of", "head of engineering", "head of technology",
-        "founder", "tutor", "trainer",
+        "founder", "tutor", 
         "data scientist", "ml engineer", "data engineer",
         "engineering manager", "etl engineer", 
-        "infra engineer",
+        "infra engineer","sales",   
         "observability engineer","Manager"
     ]
 
@@ -76,11 +68,11 @@ class JobFilterPipeline2:
 
     SOFTWARE_KEYWORDS = {
         "software", "developer", "engineer", "engineering",
-        "backend", "full stack", "fullstack",
+        "backend", "full stack", "fullstack", 
         "python", "node", "nodejs", "javascript", "typescript",
         "django", "fastapi", "flask", 
-        "devops", "cloud", "sre", "platform",
-        "api", "microservices", "infrastructure",
+        "devops", "cloud", "sre", "platform","Associate" , "AI" ,"AI Engineer",
+        "api", "microservices", "infrastructure","Analyst","IT fresher","Trainee",
         "tech lead", "sde", "swe", "mts", "programmer","react"
     }
 
@@ -105,7 +97,24 @@ class JobFilterPipeline2:
         batch_size=None,
     ):
     
-        self.api_key = openai_api_key
+        self.api_keys = []
+        if isinstance(openai_api_key, list):
+            self.api_keys = [str(k).strip() for k in openai_api_key if k and str(k).strip()]
+        elif isinstance(openai_api_key, str):
+            for k in openai_api_key.replace("\n", ",").split(","):
+                k_clean = k.strip()
+                if k_clean:
+                    self.api_keys.append(k_clean)
+
+        # Fallback to OPEN_API_KEYS / OPEN_API_KEY from environment if empty
+        if not self.api_keys:
+            env_keys = os.getenv("OPEN_API_KEYS") or os.getenv("OPEN_API_KEY") or ""
+            for k in env_keys.replace("\n", ",").split(","):
+                k_clean = k.strip()
+                if k_clean:
+                    self.api_keys.append(k_clean)
+
+        self.current_key_index = 0
         self.custom_prompt = prompt or self._default_prompt()
 
         self.url = os.getenv(
@@ -370,18 +379,26 @@ class JobFilterPipeline2:
                     f"({len(batch) - len(uncached)} cached)..."
                 )
                 scores = self._call_ai(uncached)
+                if not scores:
+                    print("  [AI WARNING] Batch scoring failed; applying uncached jobs by default without caching 0.")
                 for idx, job in enumerate(uncached):
                     jid  = str(job.get("job_id") or "")
-                    data = scores.get(str(idx), {"score": 0, "reason": "no response"})
-                    score = data.get("score", 0)
-                    if not isinstance(score, (int, float)):
-                        data = {"score": 0, "reason": "parse error"}
+                    data = scores.get(str(idx)) if scores else None
+                    if data:
+                        score = data.get("score", 0)
+                        if not isinstance(score, (int, float)):
+                            data = {"score": 0, "reason": "parse error"}
+                        else:
+                            data["score"] = int(score)
+                        if jid:
+                            self.cache[jid] = data
+                        job["ai_score"]  = data.get("score", 0)
+                        job["ai_reason"] = data.get("reason", "")
                     else:
-                        data["score"] = int(score)
-                    if jid:
-                        self.cache[jid] = data
-                    job["ai_score"]  = data.get("score", 0)
-                    job["ai_reason"] = data.get("reason", "")
+                        # Fallback: if AI failed to score, set high enough score (80)
+                        # so that it is applied to by default, without caching to disk.
+                        job["ai_score"]  = 80
+                        job["ai_reason"] = "AI unavailable (applied by default)"
             else:
                 print(
                     f"  AI batch {batch_num}/{total_batches}: "
@@ -402,8 +419,8 @@ class JobFilterPipeline2:
         )
 
     def _call_ai(self, jobs):
-        if not self.api_key:
-            print("AI ERROR: OPEN_API_KEY is missing")
+        if not self.api_keys:
+            print("AI ERROR: No API keys configured in OPEN_API_KEYS / OPEN_API_KEY")
             return {}
 
         job_block = ""
@@ -422,83 +439,84 @@ class JobFilterPipeline2:
                 f"  Days old:  {j.get('days_old', 7)}\n"
                 f"---\n"
             )
-        
+
         prompt2 = self.custom_prompt.format(job_block=job_block)
+        attempts = 0
+        total_keys = len(self.api_keys)
 
-        try:
+        while attempts < total_keys:
+            current_key = self.api_keys[self.current_key_index]
+            masked_key = f"{current_key[:12]}...{current_key[-4:]}" if len(current_key) > 16 else "key"
 
-            headers = {
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            }
+            try:
+                headers = {
+                    "Authorization": f"Bearer {current_key}",
+                    "Content-Type": "application/json",
+                }
 
-            # OpenRouter headers
-            if "openrouter.ai" in self.url.lower():
+                if "openrouter.ai" in self.url.lower():
+                    if self.site_url:
+                        headers["HTTP-Referer"] = self.site_url
+                    headers["X-Title"] = self.site_name
 
-                if self.site_url:
-                    headers["HTTP-Referer"] = self.site_url
+                payload = {
+                    "model": self.model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": prompt2
+                        }
+                    ],
+                    "temperature": 0.2,
+                }
 
-                headers["X-Title"] = self.site_name
+                res = requests.post(
+                    self.url,
+                    headers=headers,
+                    json=payload,
+                    timeout=(15, self.ai_timeout),
+                )
 
-            payload = {
-                "model": self.model,
-                "messages": [
-                    {
-                        "role": "user",
-                        "content": prompt2
-                    }
-                ],
-                "temperature": 0.2,
-            }
+                if res.status_code in (429, 401, 402, 403):
+                    print(f"  [AI KEY ROTATION] Key {self.current_key_index + 1}/{total_keys} ({masked_key}) failed (HTTP {res.status_code}). Rotating to next key...")
+                    self.current_key_index = (self.current_key_index + 1) % total_keys
+                    attempts += 1
+                    continue
 
-            res = requests.post(
-                self.url,
-                headers=headers,
-                json=payload,
-                timeout=(15, self.ai_timeout),
-            )
+                if res.status_code != 200:
+                    print("AI HTTP ERROR:", res.status_code)
+                    print(res.text[:500])
+                    # Rotate key in case it's account/key specific
+                    self.current_key_index = (self.current_key_index + 1) % total_keys
+                    attempts += 1
+                    continue
 
-            if res.status_code != 200:
-                print("AI HTTP ERROR:", res.status_code)
-                print(res.text[:500])
+                content = res.json()["choices"][0]["message"]["content"]
+                content = re.sub(r"```json|```", "", content).strip()
+                match = re.search(r"\{.*\}", content, re.S)
+
+                if not match:
+                    print("AI PARSE ERROR")
+                    print(content[:500])
+                    return {}
+
+                data = json.loads(match.group(0))
+                return data if isinstance(data, dict) else {}
+
+            except requests.Timeout:
+                print(f"AI call error: request timed out after {self.ai_timeout}s on key {masked_key}")
+                self.current_key_index = (self.current_key_index + 1) % total_keys
+                attempts += 1
+            except requests.RequestException as e:
+                print(f"AI call error on key {masked_key}:", e)
+                self.current_key_index = (self.current_key_index + 1) % total_keys
+                attempts += 1
+            except Exception as e:
+                print(f"AI call unexpected error on key {masked_key}:", e)
                 return {}
 
-            content = res.json()["choices"][0]["message"]["content"]
-
-            content = re.sub(
-                r"```json|```",
-                "",
-                content
-            ).strip()
-
-            match = re.search(
-                r"\{.*\}",
-                content,
-                re.S
-            )
-
-            if not match:
-                print("AI PARSE ERROR")
-                print(content[:500])
-                return {}
-
-            data = json.loads(
-                match.group(0)
-            )
-
-            return data if isinstance(data, dict) else {}
-
-        except requests.Timeout:
-            print(f"AI call error: request timed out after {self.ai_timeout}s")
-            return {}
-
-        except requests.RequestException as e:
-            print("AI call error:", e)
-            return {}
-
-        except Exception as e:
-            print("AI call error:", e)
-            return {}
+        print("  [AI] All configured API keys exhausted.")
+        return {}
 
     # =========================================================
     # RANK  — ai score + small recency bump

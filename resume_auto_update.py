@@ -230,8 +230,40 @@ def success(msg):
 
 
     # ==========================================================
-    # Google Drive
+    # Google Drive / Google Docs
     # ==========================================================
+
+DRIVE_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/122.0.0.0 Safari/537.36"
+    )
+}
+
+
+def _resume_extension(content: bytes):
+    if content.startswith(b"%PDF"):
+        return ".pdf"
+    if content.startswith(b"PK"):
+        return ".docx"
+    return None
+
+
+def _resume_download_urls(share_url: str, file_id: str):
+    """Google Docs need /export. Uploaded Drive files use uc?export=download."""
+    urls = []
+    if "docs.google.com/document" in share_url:
+        urls.append(
+            f"https://docs.google.com/document/d/{file_id}/export?format=docx"
+        )
+        urls.append(
+            f"https://docs.google.com/document/d/{file_id}/export?format=pdf"
+        )
+    urls.append(f"https://drive.google.com/uc?export=download&id={file_id}")
+    return urls
+
+
 @retry
 def download_resume(share_url: str, resume_name: str) -> str:
 
@@ -243,28 +275,35 @@ def download_resume(share_url: str, resume_name: str) -> str:
         error("Invalid GOOGLE_DRIVE_URL")
 
     file_id = match.group(1)
+    content = None
+    ext = None
 
-    download_url = (
-        f"https://drive.google.com/uc?export=download&id={file_id}"
-    )
+    for download_url in _resume_download_urls(share_url, file_id):
+        try:
+            response = requests.get(
+                download_url,
+                headers=DRIVE_HEADERS,
+                timeout=DOWNLOAD_TIMEOUT,
+                allow_redirects=True,
+            )
+            response.raise_for_status()
+        except requests.RequestException:
+            continue
+        ext = _resume_extension(response.content)
+        if ext:
+            content = response.content
+            break
 
-    response = requests.get(
-        download_url,
-        timeout=DOWNLOAD_TIMEOUT
-    )
-
-    response.raise_for_status()
-
-    if not response.content.startswith(b"%PDF"):
+    if not content:
         error(
-            "Downloaded file is not a valid PDF.\n"
-            "Make sure Google Drive file is shared as:\n"
-            "'Anyone with the link → Viewer'"
+            "Downloaded file is not a valid PDF or DOCX.\n"
+            "If this is a Google Doc, share it as:\n"
+            "'Anyone with the link → Viewer'\n"
+            "Or upload a .pdf/.docx file to Drive and use that file link."
         )
 
     today = datetime.now().strftime("%Y-%m-%d")
-
-    filename = f"{resume_name}_{today}.pdf"
+    filename = f"{resume_name}_{today}{ext}"
 
     filepath = os.path.join(
         tempfile.gettempdir(),
@@ -272,7 +311,7 @@ def download_resume(share_url: str, resume_name: str) -> str:
     )
 
     with open(filepath, "wb") as f:
-        f.write(response.content)
+        f.write(content)
 
     success(f"Downloaded: {filename}")
 
@@ -317,18 +356,19 @@ def main():
         "RESUME_NAME",
         "Resume"
     )
-    if not username:
-        error("USERNAME missing in .env")
+    auth_token = os.getenv("NAUKRI_AUTH_TOKEN") or os.getenv("NAUK_AT")
+    if not auth_token and not username:
+        error("USERNAME or NAUKRI_AUTH_TOKEN missing in .env")
 
-    if not password:
-        error("PASSWORD missing in .env")
+    if not auth_token and not password:
+        error("PASSWORD missing in .env (or provide NAUKRI_AUTH_TOKEN)")
 
     if not drive_url:
         error("GOOGLE_DRIVE_URL missing in .env")
 
     success("Environment loaded")
 
-    pdf_path = None
+    resume_path = None
 
     try:
 
@@ -336,7 +376,7 @@ def main():
         # Download Resume
         # --------------------------------------
 
-        pdf_path = download_resume(
+        resume_path = download_resume(
             drive_url,
             resume_name
         )
@@ -345,13 +385,11 @@ def main():
         # Login
         # --------------------------------------
 
-        print("\n🔐 Logging into Naukri...")
-
+        print("\n🔐 Authenticating with Naukri...")
         client = NaukriLoginClient(
             username,
             password
         )
-
         login_client(client)
 
         success("Login successful")
@@ -362,11 +400,11 @@ def main():
 
         print("\n📤 Uploading latest resume...")
 
-        result = upload_resume(client,pdf_path)
+        result = upload_resume(client, resume_path)
 
         success("Resume updated successfully")
         logger.info(
-            f"Uploaded Resume : {os.path.basename(pdf_path)}"
+            f"Uploaded Resume : {os.path.basename(resume_path)}"
         )
         save_status(
             "SUCCESS",
@@ -401,11 +439,11 @@ def main():
 
     finally:
 
-        if pdf_path and os.path.exists(pdf_path):
+        if resume_path and os.path.exists(resume_path):
 
             try:
 
-                os.remove(pdf_path)
+                os.remove(resume_path)
                 success("Temporary resume deleted")
 
             except Exception:

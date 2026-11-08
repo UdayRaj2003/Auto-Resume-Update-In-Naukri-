@@ -447,21 +447,23 @@ if __name__ == "__main__":
 
     username = os.getenv("USERNAME")
     password = os.getenv("PASSWORD")
-    ai_key   = os.getenv("OPEN_API_KEY")
+    raw_keys = os.getenv("OPEN_API_KEYS") or os.getenv("OPEN_API_KEY") or ""
+    ai_keys = [k.strip() for k in raw_keys.replace("\n", ",").split(",") if k.strip()]
 
-    if not username or not password:
-        print(f"\n{Fore.RED}  USERNAME and PASSWORD must be set in .env{Style.RESET_ALL}")
+    auth_token = os.getenv("NAUKRI_AUTH_TOKEN") or os.getenv("NAUK_AT")
+    if not auth_token and (not username or not password):
+        print(f"\n{Fore.RED}  USERNAME and PASSWORD (or NAUKRI_AUTH_TOKEN) must be set in .env{Style.RESET_ALL}")
         exit(1)
 
-    if not ai_key:
-        print(f"\n{Fore.RED}  OPEN_API_KEY must be set in .env{Style.RESET_ALL}")
+    if not ai_keys:
+        print(f"\n{Fore.RED}  OPEN_API_KEYS or OPEN_API_KEY must be set in .env{Style.RESET_ALL}")
         exit(1)
 
     # Step 1: authenticate and establish session.
-    print_section_title("logging in to naukri")
+    print_section_title("authenticating with naukri")
     client = NaukriLoginClient(username, password)
     client.login()
-    print(f"  {Fore.GREEN}Logged in as {Fore.YELLOW}{username}{Style.RESET_ALL}")
+    print(f"  {Fore.GREEN}Authenticated successfully as {Fore.YELLOW}{username or 'token user'}{Style.RESET_ALL}")
 
     # Step 2: fetch raw jobs from search API.
     jc   = NaukriJobClient(client)
@@ -474,7 +476,7 @@ if __name__ == "__main__":
     # Step 3: run AI filter pipeline. Jobs are scored and ranked. Only those
     # above the pipeline's threshold are passed to the apply loop.
     print_section_title("running AI filter pipeline")
-    pipeline   = JobFilterPipeline2( openai_api_key=ai_key, prompt=AI_PROMPT)
+    pipeline   = JobFilterPipeline2(openai_api_key=ai_keys, prompt=AI_PROMPT)
     final_jobs = pipeline.run(jobs)
 
     # Build a lookup from job_id to the pipeline result dict (ai_score, ai_reason, etc.)
@@ -512,7 +514,14 @@ if __name__ == "__main__":
         )
 
         # External apply jobs cannot be submitted via the API, skip them.
-        if jc.is_external_apply(job.job_id):
+        try:
+            external = jc.is_external_apply(job.job_id)
+        except Exception as e:
+            print_status_failed(f"external apply check — {e}")
+            failed_count += 1
+            continue
+
+        if external:
             print_status_skipped_external()
             skipped_ext += 1
             continue

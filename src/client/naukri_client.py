@@ -1,4 +1,5 @@
 import logging
+import os
 import random
 import time
 import functools
@@ -100,13 +101,53 @@ OTP_HEADERS = {
 
 class NaukriLoginClient:
 
-    def __init__(self, username, password):
+    def __init__(self, username="", password="", auth_token=None):
         self.username = username
         self.password = password
         self.session = build_session()
         self.naukri_session = None
         self.profile_id = None
         self.cache = {}
+
+        token = auth_token or os.getenv("NAUKRI_AUTH_TOKEN") or os.getenv("NAUK_AT")
+        if token:
+            rt = os.getenv("NAUKRI_REFRESH_TOKEN") or os.getenv("NAUK_RT") or ""
+            self._init_session(token, rt)
+
+    def _apply_cookie(self, name, val):
+        if not val:
+            return
+        if hasattr(self.session, "set_cookie"):
+            self.session.set_cookie(name, val, domain=".naukri.com")
+        elif isinstance(self.session.cookies, dict):
+            self.session.cookies[name] = val
+        elif hasattr(self.session.cookies, "set"):
+            self.session.cookies.set(name, val, domain=".naukri.com")
+
+    def _init_session(self, nauk_at, nauk_rt=""):
+        self._apply_cookie("nauk_at", nauk_at)
+        if nauk_rt:
+            self._apply_cookie("nauk_rt", nauk_rt)
+        cookie_dict = {"nauk_at": nauk_at}
+        if nauk_rt:
+            cookie_dict["nauk_rt"] = nauk_rt
+        self.naukri_session = NaukriSession(bearer_token=nauk_at, cookies=cookie_dict)
+        try:
+            self.cache["form_key"] = self.get_form_key2()
+        except Exception:
+            pass
+
+    @classmethod
+    def from_browser_cookies(cls, nauk_at: str, nauk_rt: str = "") -> "NaukriLoginClient":
+        """Build an authenticated client from browser cookies without calling /login."""
+        client = cls.__new__(cls)
+        client.username = ""
+        client.password = ""
+        client.session = build_session()
+        client.profile_id = None
+        client.cache = {}
+        client._init_session(nauk_at, nauk_rt)
+        return client
 
     def _build_headers(self, auth=False, extra=None):
         headers = DEFAULT_HEADERS.copy()
@@ -115,6 +156,7 @@ class NaukriLoginClient:
                 raise NaukriAuthError("Login required")
             headers["authorization"] = f"Bearer {self.naukri_session.bearer_token}"
             headers["systemid"] = "Naukri"
+            self._apply_cookie("nauk_at", self.naukri_session.bearer_token)
         if extra:
             headers.update(extra)
         return headers
@@ -132,33 +174,76 @@ class NaukriLoginClient:
             json={"username": self.username, "password": self.password},
         )
 
-    def login(self):
-        res = self._login_request()
-
-        if not res.ok:
-            print(res.content)
-            raise NaukriAuthError("Login failed")
-
-        token = None
-
-        for cookie in self.session.cookies:
-            if cookie.name == "nauk_at":
-                token = cookie.value
-                break
-
-        if not token:
-            raise NaukriAuthError("No token")
-
-        cookie_dict = {c.name: c.value for c in self.session.cookies}
-
-        self.naukri_session = NaukriSession(token, cookie_dict)
-
+    def is_session_valid(self) -> bool:
+        """Check if current bearer token is active and valid against Naukri API."""
+        if not self.naukri_session or not self.naukri_session.bearer_token:
+            return False
         try:
-            self.cache["form_key"] = self.get_form_key2()
+            res = self.session.get(DASHBOARD_URL, headers=self._build_headers(auth=True), timeout=10)
+            return res.status_code == 200
         except Exception:
-            pass
+            return False
 
-        return self.naukri_session
+    def trigger_browser_login(self) -> bool:
+        """Launch login_browser to capture a fresh session token when stale or blocked."""
+        logger.warning("Session stale or password login blocked. Launching browser login helper...")
+        print("\n⚠️  Naukri session is stale or login is blocked.")
+        print("🌐 Launching browser for authentication...")
+        try:
+            from login_browser import run_login
+            if run_login():
+                new_token = os.getenv("NAUKRI_AUTH_TOKEN") or os.getenv("NAUK_AT")
+                if new_token:
+                    self._init_session(new_token)
+                    return True
+        except Exception as e:
+            logger.error("Browser login helper failed: %s", e)
+        return False
+
+    def login(self, auto_browser=True):
+        if self.naukri_session and self.is_session_valid():
+            return self.naukri_session
+
+        # Token was missing or stale. Try password login if credentials exist
+        if self.username and self.password:
+            try:
+                res = self._login_request()
+                if res.ok:
+                    token = None
+                    for cookie in self.session.cookies:
+                        if getattr(cookie, "name", None) == "nauk_at":
+                            token = cookie.value
+                            break
+                        elif isinstance(cookie, dict) and cookie.get("name") == "nauk_at":
+                            token = cookie.get("value")
+                            break
+                    if token:
+                        cookie_dict = {getattr(c, "name", str(i)): getattr(c, "value", "") for i, c in enumerate(self.session.cookies)}
+                        self.naukri_session = NaukriSession(token, cookie_dict)
+                        try:
+                            from login_browser import update_env_token
+                            update_env_token(token)
+                        except Exception:
+                            pass
+                        try:
+                            self.cache["form_key"] = self.get_form_key2()
+                        except Exception:
+                            pass
+                        return self.naukri_session
+                else:
+                    logger.warning("Password login failed [%s]: %s", res.status_code, res.text)
+            except Exception as e:
+                logger.warning("Password login exception: %s", e)
+
+        # If password login failed/blocked (e.g. 406 captcha) or token stale, auto-launch browser login
+        if auto_browser:
+            if self.trigger_browser_login() and self.naukri_session and self.is_session_valid():
+                return self.naukri_session
+
+        raise NaukriAuthError(
+            "Authentication failed. Stale cookie or reCAPTCHA blocked login. "
+            "Please run 'python login_browser.py' to authenticate."
+        )
     # ------------------------------------------------------------------
     # form_key helpers
     # ------------------------------------------------------------------
@@ -339,15 +424,18 @@ class NaukriLoginClient:
             except Exception:
                 continue
 
-        try:
-            fallback_url = "https://static.naukimg.com/s/5/105/j/mnj_v299.min.js"
-            js_content = self._fetch_js(fallback_url).text
-            key = extract_form_key2(js_content)
-            if key:
-                self.cache["form_key"] = key
-                return key
-        except Exception:
-            pass
+        # Profile page no longer links the mnj bundle directly; discover its
+        # version from the app bundle's version map, then fall back to known versions.
+        from src.utils.formkey import candidate_mnj_urls
+        for mnj_js_url in candidate_mnj_urls(html, lambda u: self._fetch_js(u).text):
+            try:
+                js_content = self._fetch_js(mnj_js_url).text
+                key = extract_form_key2(js_content)
+                if key:
+                    self.cache["form_key"] = key
+                    return key
+            except Exception:
+                continue
 
         raise NaukriParseError("formKey2 not found")
 
@@ -377,12 +465,31 @@ class NaukriLoginClient:
     # File validation / resume upload
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _resume_content_type(filename, file_bytes):
+        ext = Path(filename).suffix.lower()
+        mime_by_ext = {
+            ".pdf": "application/pdf",
+            ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            ".doc": "application/msword",
+        }
+        if ext in mime_by_ext:
+            return mime_by_ext[ext]
+        if file_bytes.startswith(b"%PDF"):
+            return mime_by_ext[".pdf"]
+        if file_bytes.startswith(b"PK"):
+            return mime_by_ext[".docx"]
+        if file_bytes.startswith(b"\xd0\xcf\x11\xe0"):
+            return mime_by_ext[".doc"]
+        return "application/pdf"
+
     @with_exponential_retry(label="validate_file")
     def _validate_file_request(self, filename, file_bytes, form_key, file_key):
+        content_type = self._resume_content_type(filename, file_bytes)
         return requests.post(
             FILE_VALIDATION_URL,
             headers=UPLOAD_HEADERS,
-            files={"file": (filename, BytesIO(file_bytes), "application/pdf")},
+            files={"file": (filename, BytesIO(file_bytes), content_type)},
             data={
                 "formKey": form_key,
                 "fileName": filename,
@@ -447,7 +554,11 @@ class NaukriLoginClient:
 
         payload = {"textCV": {"formKey": form_key, "fileKey": file_key}}
         res = self._update_resume_request(url, headers, payload)
-        return ResumeUpdateResult(pid, res.json(), res.status_code)
+        try:
+            body = res.json()
+        except Exception:
+            body = {"text": res.text}
+        return ResumeUpdateResult(pid, body, res.status_code)
 
     # ------------------------------------------------------------------
     # Profile update

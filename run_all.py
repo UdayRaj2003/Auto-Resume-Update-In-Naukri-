@@ -62,6 +62,7 @@ def pipeline_env() -> dict[str, str]:
     env = os.environ.copy()
     env.setdefault("PYTHONIOENCODING", "utf-8")
     env.setdefault("PYTHONUTF8", "1")
+    env.setdefault("PYTHONUNBUFFERED", "1")
     return env
 
 

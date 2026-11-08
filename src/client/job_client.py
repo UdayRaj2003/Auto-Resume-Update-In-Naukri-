@@ -281,10 +281,26 @@ class NaukriJobClient:
         except Exception:
             raise NaukriParseError(f"Invalid JSON response: {res.text}")
 
+    @staticmethod
+    def _job_payload_from_details(data: dict) -> dict:
+        """Normalize job details JSON — Naukri sometimes returns job as a list."""
+        if not isinstance(data, dict):
+            return {}
+
+        job = data.get("job")
+        if isinstance(job, dict):
+            return job
+        if isinstance(job, list):
+            for item in job:
+                if isinstance(item, dict):
+                    return item
+        return {}
+
     def is_external_apply(self, job_id: str, sid: str = "") -> bool:
         # Returns True if the job redirects to an external company URL for apply.
         data = self.get_job_details(job_id, sid)
-        return data.get("job", {}).get("responseManager") == "companyUrl"
+        job_payload = self._job_payload_from_details(data)
+        return job_payload.get("responseManager") == "companyUrl"
 
     # ----------------------------------------------------------------------------------
     # Apply job
@@ -370,15 +386,15 @@ class NaukriJobClient:
         # Static profile values used when generating questionnaire answers.
         # Update these to match the candidate's actual profile.
         PROFILE = {
-            "current_ctc":  "5",
-            "expected_ctc": "7",
-            "exp_total":    "2",
-            "exp_node":     "2",
-            "exp_python":   "1",
-            "notice_days":  30,
+            "current_ctc":  "0",
+            "expected_ctc": "5",
+            "exp_total":    "0",
+            "exp_node":     "4",
+            "exp_python":   "2",
+            "notice_days":  0,
             "skills": [
-                "node", "docker", "kubernetes",
-                "aws", "ci/cd", "jenkins", "terraform",
+                "node", "jira", "c++", "pytest" ,
+                "aws", "git" ,"github","python" ,"javascript","sql" ,  
             ],
         }
 
@@ -521,7 +537,7 @@ class NaukriJobClient:
         location:         str = "",
         page:             int = 2,
         job_age:          int = 3,
-        experience:       int = 2,
+        experience:       int = 0,
         results_per_page: int = 20,
         lat_long:         str = "",
     ) -> list[Job]:
